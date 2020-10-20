@@ -45,6 +45,7 @@
 #include "dnsproxy.hh"
 #include "version.hh"
 #include "common_startup.hh"
+#include "stubresolver.hh"
 
 #if 0
 #undef DLOG
@@ -475,15 +476,35 @@ int PacketHandler::doAdditionalProcessingAndDropAA(DNSPacket& p, std::unique_ptr
       B.lookup(QType(d_doIPv6AdditionalProcessing ? QType::ANY : QType::A), lookup, soadata.domain_id, &p);
 
       while(B.get(rr)) {
-        if(rr.dr.d_type != QType::A && rr.dr.d_type!=QType::AAAA)
+        if(rr.dr.d_type != QType::A && rr.dr.d_type!=QType::AAAA && rr.dr.d_type!=QType::ALIAS)
           continue;
         if(!rr.dr.d_name.isPartOf(soadata.qname)) {
           // FIXME we might still pass on the record if it is occluded and the
           // backend uses a single id for all zones
           continue;
         }
-        rr.dr.d_place=DNSResourceRecord::ADDITIONAL;
-        toAdd.push_back(rr);
+        if(rr.dr.d_type==QType::ALIAS) {
+        	/* resolve ALIAS record and add A and AAAA results to the response (additional section), so you'll get dynamic glue records! */
+            vector<DNSZoneRecord> ips;
+            int ret_a    = stubDoResolve(getRR<ALIASRecordContent>(rr.dr)->d_content, QType::A,    ips);
+            int ret_aaaa = stubDoResolve(getRR<ALIASRecordContent>(rr.dr)->d_content, QType::AAAA, ips);
+            if(ret_a != RCode::NoError && ret_a != RCode::NXDomain) {
+              g_log << Logger::Error << "Error '" << ERCode::to_s(ret_a) << "' resolving additional record " << rr.dr.d_name << " ALIAS A " << getRR<ALIASRecordContent>(rr.dr)->d_content << ", skip it" << endl;
+            }
+            if(ret_aaaa != RCode::NoError && ret_aaaa != RCode::NXDomain) {
+              g_log << Logger::Error << "Error '" << ERCode::to_s(ret_aaaa) << "' resolving additional record " << rr.dr.d_name << " ALIAS AAAA " << getRR<ALIASRecordContent>(rr.dr)->d_content << ", skip it" << endl;
+            }
+            for(const auto& ip: ips) {
+              rr.dr.d_place = DNSResourceRecord::ADDITIONAL;
+              rr.dr.d_type = ip.dr.d_type;
+              rr.dr.d_content = ip.dr.d_content;
+              toAdd.push_back(rr);
+            }
+        }
+        else {
+          rr.dr.d_place=DNSResourceRecord::ADDITIONAL;
+          toAdd.push_back(rr);
+        }
       }
     }
 
